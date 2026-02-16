@@ -1,0 +1,80 @@
+name: Weekly Ontario Job Monitor
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 13 * * 1'
+
+permissions:
+  contents: write
+
+jobs:
+  run-job-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run discover
+        env:
+          PYTHONPATH: src
+          ORGS_CSV: data/orgs.csv
+          ORGS_ENRICHED_CSV: data/orgs_enriched.csv
+          DB_PATH: state/postings.sqlite
+          GLOBAL_CONCURRENCY: 80
+          PER_DOMAIN_RPS: 1.0
+          REQUEST_TIMEOUT_SECONDS: 10
+          MAX_REDIRECTS: 8
+          MAX_HTML_BYTES: 350000
+          DISCOVERY_CACHE_TTL_DAYS: 45
+        run: |
+          python -m ontario_job_bot discover --input "$ORGS_CSV" --output "$ORGS_ENRICHED_CSV"
+
+      - name: Run monitor
+        env:
+          PYTHONPATH: src
+          ORGS_ENRICHED_CSV: data/orgs_enriched.csv
+          DB_PATH: state/postings.sqlite
+          GLOBAL_CONCURRENCY: 80
+          PER_DOMAIN_RPS: 1.0
+          REQUEST_TIMEOUT_SECONDS: 10
+          MAX_REDIRECTS: 8
+          MAX_HTML_BYTES: 350000
+          BREVO_SMTP_SERVER: smtp-relay.brevo.com
+          BREVO_SMTP_PORT: 587
+          BREVO_SMTP_LOGIN: ${{ secrets.BREVO_SMTP_LOGIN }}
+          BREVO_SMTP_KEY: ${{ secrets.BREVO_SMTP_KEY }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          SEND_EMPTY_DIGEST: false
+          GOOGLE_SHEETS_SPREADSHEET_ID: ${{ secrets.GOOGLE_SHEETS_SPREADSHEET_ID }}
+          GOOGLE_SHEETS_WORKSHEET: Postings
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          python -m ontario_job_bot monitor --input "$ORGS_ENRICHED_CSV"
+
+      - name: Commit state updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/orgs_enriched.csv state/postings.sqlite
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "chore: weekly monitoring state update $(date -u +%F)"
+            git push
+          fi

@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ontario-job-bot"
+version = "0.1.0"
+description = "Ontario municipalities and First Nations job monitoring bot"
+requires-python = ">=3.11"
+dependencies = [
+  "httpx>=0.27.0",
+  "beautifulsoup4>=4.12.3",
+  "lxml>=5.2.2",
+  "gspread>=6.1.2",
+  "google-auth>=2.33.0",
+  "python-dateutil>=2.9.0",
+  "python-dotenv>=1.0.1",
+]
+
+[project.scripts]
+ontario-job-bot = "ontario_job_bot.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

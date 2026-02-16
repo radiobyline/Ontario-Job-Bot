@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+.pytest_cache/
+state/*.log
+state/*.json
+state/*.tmp
+state/*.sqlite-shm
+state/*.sqlite-wal
