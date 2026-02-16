@@ -146,6 +146,25 @@ CLOSING_DATE_RE = re.compile(
     rf"(?:closing|close date|applications? close|applications? due|deadline|apply by|closing date)[^\n\r]{{0,80}}?({DATE_LITERAL_PATTERN})",
     flags=re.IGNORECASE,
 )
+TITLE_SPLIT_RE = re.compile(r"\s[-|:]\s")
+TITLE_NOISE_SEGMENT_RE = re.compile(
+    r"\b(?:recruitment|job posting|job description|closed|posting id|req(?:uisition)?\.?|competition)\b",
+    flags=re.IGNORECASE,
+)
+TITLE_PREFIX_PATTERNS = (
+    r"^(?:closed\s*[-:|]\s*)?recruitment\s*[-:|]\s*\d{4,8}\s*[-:|]\s*",
+    r"^(?:closed\s*[-:|]\s*)?recruitment\s*[-:|]\s*",
+    r"^\d{4,8}\s*[-:|]\s*",
+    r"^(?:job\s*(?:posting|description)\s*[-:|]\s*)+",
+)
+TITLE_SUFFIX_PATTERNS = (
+    r"\s*[-:|]?\s*job\s*(?:description|posting|advertisement|ad|profile)\b(?:\s+\d{2,4})?\s*$",
+    r"\s*[-:|]?\s*job\s*(?:description|posting|advertisement|ad|profile)\b(?:\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{4})\s*$",
+    r"\s+\bjob\b\s*$",
+    r"\s*[-:|]?\s*recruitment\b(?:\s+\d{4,8})?\s*$",
+    r"\s*[-:|]?\s*(?:posting|req(?:uisition)?|competition)\s*(?:id|#)?\s*[a-z0-9-]+\s*$",
+    r"\s+\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{1,2}(?:,\s*)?)?\s+\d{4}\s*$",
+)
 
 
 def _clean(value: str) -> str:
@@ -249,7 +268,76 @@ def derive_title_from_url(url: str) -> str:
         else:
             normalized_words.append(word.capitalize())
 
-    return _clean(" ".join(normalized_words))
+    return normalize_job_title(_clean(" ".join(normalized_words)))
+
+
+def _title_segment_score(segment: str) -> int:
+    low = normalize_text(segment)
+    score = 0
+    if len(low.split()) >= 2:
+        score += 2
+    if any(word in low for word in ROLE_HINT_WORDS):
+        score += 4
+    if any(word in low for word in ("job", "position", "opportun", "career", "employment")):
+        score += 2
+    if TITLE_NOISE_SEGMENT_RE.search(low):
+        score -= 4
+    if re.search(r"\d{4,}", low):
+        score -= 1
+    return score
+
+
+def _strip_trailing_title_date(value: str) -> str:
+    return re.sub(
+        r"\s+\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{1,2}(?:,\s*)?)?\s+\d{4}\s*$",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    ).strip(" -|:")
+
+
+def normalize_job_title(value: str) -> str:
+    title = _clean(value)
+    if not title:
+        return ""
+
+    title = title.replace("—", " - ").replace("–", " - ")
+    title = re.sub(r"\s+", " ", title).strip(" -|:")
+
+    for _ in range(3):
+        previous = title
+        for pattern in TITLE_PREFIX_PATTERNS:
+            title = re.sub(pattern, "", title, flags=re.IGNORECASE).strip(" -|:")
+        if title == previous:
+            break
+
+    for pattern in TITLE_SUFFIX_PATTERNS:
+        title = re.sub(pattern, "", title, flags=re.IGNORECASE).strip(" -|:")
+
+    parts = [part.strip(" -|:") for part in TITLE_SPLIT_RE.split(title) if part.strip(" -|:")]
+    if len(parts) > 1:
+        filtered: list[str] = []
+        for part in parts:
+            if re.fullmatch(r"\d{4,8}", part):
+                continue
+            if TITLE_NOISE_SEGMENT_RE.search(part):
+                continue
+            cleaned_part = _strip_trailing_title_date(part)
+            if not cleaned_part:
+                continue
+            filtered.append(cleaned_part)
+        if filtered:
+            part_scores = [(part, _title_segment_score(part)) for part in filtered]
+            if len(part_scores) >= 2 and part_scores[0][1] >= 3 and part_scores[1][1] >= 1 and len(part_scores[1][0].split()) >= 2:
+                title = f"{part_scores[0][0]} - {part_scores[1][0]}"
+            else:
+                scored = sorted(part_scores, key=lambda item: (item[1], len(item[0])), reverse=True)
+                title = scored[0][0] if scored[0][1] >= 1 else " - ".join(part for part, _ in part_scores)
+
+    title = _strip_trailing_title_date(title)
+
+    title = _clean(title.strip(" -|:"))
+    return title
 
 
 def is_noise_title(title: str) -> bool:
@@ -406,9 +494,9 @@ def _extract_identifier(value: Any) -> str:
 
 
 def _best_title(anchor_text: str, posting_url: str) -> str:
-    candidate = _clean(anchor_text)
+    candidate = normalize_job_title(_clean(anchor_text))
     if not candidate or is_noise_title(candidate):
-        candidate = derive_title_from_url(posting_url)
+        candidate = normalize_job_title(derive_title_from_url(posting_url))
     if is_noise_title(candidate):
         return ""
     return candidate
