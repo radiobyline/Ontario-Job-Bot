@@ -6,7 +6,7 @@ from ..config import Settings
 from ..http_client import AsyncHttpHelper
 from ..models import Posting
 from ..utils import normalize_url
-from .common import fallback_generic_html
+from .common import fallback_generic_html, normalize_date
 from .generic import GenericAdapter
 
 
@@ -62,7 +62,15 @@ class WorkdayAdapter:
                                 title=title,
                                 posting_url=posting_url,
                                 location=location,
-                                posted_date=str(item.get("postedOn") or ""),
+                                posting_date=normalize_date(str(item.get("postedOn") or "")),
+                                closing_date=normalize_date(
+                                    str(
+                                        item.get("endDate")
+                                        or item.get("validThrough")
+                                        or item.get("closeOn")
+                                        or ""
+                                    )
+                                ),
                                 summary="",
                                 raw_text=f"{title} {location}",
                             )

@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import csv
 import re
-from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -146,7 +145,8 @@ def posting_to_db_row(posting) -> dict[str, str]:
             posting.title,
             posting.posting_url,
             posting.location,
-            posting.posted_date,
+            posting.posting_date,
+            posting.closing_date,
             posting.summary,
         ]
     )
@@ -156,7 +156,8 @@ def posting_to_db_row(posting) -> dict[str, str]:
         "title": posting.title[:500],
         "posting_url": posting.posting_url,
         "location": posting.location[:250],
-        "posted_date": posting.posted_date[:80],
+        "posting_date": posting.posting_date[:80],
+        "closing_date": posting.closing_date[:80],
         "summary": posting.summary[:3000],
         "content_hash": stable_hash(content_seed),
         "raw_text": posting.raw_text,
@@ -201,8 +202,14 @@ def render_digest(new_rows: list[dict[str, Any]], org_name_map: dict[str, str]) 
         title = str(row.get("title", ""))
         posting_url = str(row.get("posting_url", ""))
         board_url = str(row.get("board_url", ""))
+        posting_date = str(row.get("posting_date", ""))
+        closing_date = str(row.get("closing_date", ""))
         lines.append(f"- {title}")
         lines.append(f"  Org(s): {org_label}")
+        if posting_date:
+            lines.append(f"  Posted: {posting_date}")
+        if closing_date:
+            lines.append(f"  Closing: {closing_date}")
         lines.append(f"  Posting: {posting_url}")
         lines.append(f"  Board: {board_url}")
         lines.append("")
@@ -213,6 +220,8 @@ def render_digest(new_rows: list[dict[str, Any]], org_name_map: dict[str, str]) 
                     "<li>",
                     f"<strong>{title}</strong><br>",
                     f"Org(s): {org_label}<br>",
+                    f"{('Posted: ' + posting_date + '<br>') if posting_date else ''}",
+                    f"{('Closing: ' + closing_date + '<br>') if closing_date else ''}",
                     f"Posting: <a href=\"{posting_url}\">{posting_url}</a><br>",
                     f"Board: <a href=\"{board_url}\">{board_url}</a>",
                     "</li>",

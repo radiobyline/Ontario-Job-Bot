@@ -6,6 +6,8 @@ Fast two-part job monitoring for Ontario municipalities and Ontario First Nation
 
 - Part A (`discover`): canonicalizes each organization's `jobs_url` into a direct, scrapeable board URL.
 - Part B (`monitor`): scrapes canonical boards weekly, detects new postings via SQLite history, emails a digest, and upserts to Google Sheets without overwriting manual columns (`status`, `applied_date`, `notes`).
+  - Captures `posting_date` and `closing_date` when available.
+  - Filters social/share/navigation links so `posting_url` and `title` are job-focused.
 
 ## Key design constraints implemented
 
@@ -79,6 +81,15 @@ Used for:
 ## Google Sheets behavior
 
 Sheet tab: `Postings` (configurable).
+
+System-managed columns include:
+- `posting_uid`
+- `title`
+- `posting_url`
+- `posting_date`
+- `closing_date`
+- `org_ids` / `org_names`
+- `board_url`
 
 Upsert keeps manual columns untouched for existing rows:
 - `status`

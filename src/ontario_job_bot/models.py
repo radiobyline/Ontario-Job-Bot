@@ -41,7 +41,8 @@ class Posting:
     title: str
     posting_url: str
     location: str = ""
-    posted_date: str = ""
+    posting_date: str = ""
+    closing_date: str = ""
     summary: str = ""
     raw_text: str = ""
 

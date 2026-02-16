@@ -8,3 +8,4 @@ state/*.json
 state/*.tmp
 state/*.sqlite-shm
 state/*.sqlite-wal
+state/postings_tmp*.sqlite

@@ -56,6 +56,8 @@ def init_db(conn: sqlite3.Connection) -> None:
             title TEXT NOT NULL,
             posting_url TEXT NOT NULL,
             location TEXT,
+            posting_date TEXT,
+            closing_date TEXT,
             posted_date TEXT,
             summary TEXT,
             content_hash TEXT NOT NULL,
@@ -84,7 +86,29 @@ def init_db(conn: sqlite3.Connection) -> None:
         );
         """
     )
+    _ensure_posting_columns(conn)
     conn.commit()
+
+
+def _ensure_posting_columns(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(posting)").fetchall()
+    }
+    if "posting_date" not in columns:
+        conn.execute("ALTER TABLE posting ADD COLUMN posting_date TEXT")
+    if "closing_date" not in columns:
+        conn.execute("ALTER TABLE posting ADD COLUMN closing_date TEXT")
+    if "posted_date" not in columns:
+        conn.execute("ALTER TABLE posting ADD COLUMN posted_date TEXT")
+
+    conn.execute(
+        """
+        UPDATE posting
+        SET posting_date = COALESCE(NULLIF(posting_date, ''), posted_date, '')
+        WHERE posting_date IS NULL OR posting_date = ''
+        """
+    )
 
 
 def start_run(conn: sqlite3.Connection, run_type: str) -> int:
@@ -240,6 +264,8 @@ def upsert_postings(
                     title = ?,
                     posting_url = ?,
                     location = ?,
+                    posting_date = ?,
+                    closing_date = ?,
                     posted_date = ?,
                     summary = ?,
                     content_hash = ?,
@@ -253,7 +279,9 @@ def upsert_postings(
                     p["title"],
                     p["posting_url"],
                     p.get("location", ""),
-                    p.get("posted_date", ""),
+                    p.get("posting_date", p.get("posted_date", "")),
+                    p.get("closing_date", ""),
+                    p.get("posting_date", p.get("posted_date", "")),
                     p.get("summary", ""),
                     p["content_hash"],
                     now,
@@ -265,10 +293,10 @@ def upsert_postings(
                 """
                 INSERT INTO posting (
                     posting_uid, board_url, external_id, title, posting_url,
-                    location, posted_date, summary, content_hash,
+                    location, posting_date, closing_date, posted_date, summary, content_hash,
                     first_seen_at, last_seen_at, is_active
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 """,
                 (
                     uid,
@@ -277,7 +305,9 @@ def upsert_postings(
                     p["title"],
                     p["posting_url"],
                     p.get("location", ""),
-                    p.get("posted_date", ""),
+                    p.get("posting_date", p.get("posted_date", "")),
+                    p.get("closing_date", ""),
+                    p.get("posting_date", p.get("posted_date", "")),
                     p.get("summary", ""),
                     p["content_hash"],
                     now,
@@ -335,7 +365,8 @@ def fetch_all_postings_for_sheet(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             p.title,
             p.posting_url,
             p.location,
-            p.posted_date,
+            p.posting_date,
+            p.closing_date,
             p.is_active,
             b.jobs_source_type,
             b.adapter,
@@ -363,7 +394,8 @@ def fetch_postings_with_orgs(conn: sqlite3.Connection, posting_uids: list[str]) 
             p.title,
             p.posting_url,
             p.location,
-            p.posted_date,
+            p.posting_date,
+            p.closing_date,
             p.summary,
             b.jobs_source_type,
             b.adapter,
