@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Any
@@ -8,23 +9,16 @@ from urllib.parse import unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
+from ..http_client import AsyncHttpHelper
 from ..models import Posting
-from ..utils import normalize_text, normalize_url, stable_hash
-
-
-JOB_HINT_KEYWORDS = (
-    "job",
-    "jobs",
-    "career",
-    "careers",
-    "employment",
-    "opportun",
-    "vacan",
-    "position",
-    "posting",
-    "recruit",
-    "apply",
+from ..title_normalize_and_validate import (
+    analyze_listing_signals,
+    extract_title_hierarchy_from_detail,
+    is_anchor_job_title_candidate,
+    normalize_job_title,
 )
+from ..utils import normalize_url, stable_hash
+
 
 SOCIAL_DOMAINS = {
     "twitter.com",
@@ -48,79 +42,6 @@ BLOCKED_URL_TOKENS = (
     "javascript:",
 )
 
-BLOCKED_TEXT_EXACT = {
-    "twitter",
-    "facebook",
-    "instagram",
-    "linkedin",
-    "youtube",
-    "skip to content",
-    "skip to main content",
-    "home",
-    "menu",
-    "search",
-    "contact",
-}
-
-BLOCKED_TEXT_CONTAINS = (
-    "share",
-    "privacy",
-    "terms",
-    "accessibility",
-    "cookie",
-    "copyright",
-    "follow us",
-    "all rights reserved",
-)
-
-GENERIC_TITLE_TEXT = {
-    "apply",
-    "apply now",
-    "apply today",
-    "job posting",
-    "details",
-    "read more",
-    "learn more",
-    "click here",
-    "view",
-    "view details",
-    "download",
-    "pdf",
-    "career",
-    "careers",
-    "employment",
-    "employment opportunities",
-    "job opportunities",
-    "opportunities",
-    "view jobs",
-    "view job openings",
-    "open positions",
-    "current opportunities",
-    "apply here",
-    "job board",
-    "jobs board",
-    "full list of jobs",
-    "employment and training services",
-    "employment training services",
-    "careers nogdawindamin",
-    "job opportunity",
-    "job opportunities",
-    "view posting",
-    "view postings",
-    "view posting pdf",
-    "view pdf posting",
-    "view job posting",
-    "view job postings",
-    "view and apply",
-    "see job postings",
-    "see current employment opportunities",
-    "learn more and view job postings",
-    "skip to content",
-    "openings",
-    "index",
-    "index cfm",
-}
-
 NAV_CLASS_TOKENS = (
     "nav",
     "menu",
@@ -129,13 +50,6 @@ NAV_CLASS_TOKENS = (
     "social",
     "breadcrumb",
     "site-map",
-)
-
-HARD_NON_JOB_URL_TOKENS = (
-    "/laws/",
-    "/regulation/",
-    "/permits/",
-    "building-permit",
 )
 
 DATE_LITERAL_PATTERN = (
@@ -156,39 +70,6 @@ POSTING_DATE_RE = re.compile(
 CLOSING_DATE_RE = re.compile(
     rf"(?:closing|close date|applications? close|applications? due|deadline|apply by|closing date)[^\n\r]{{0,80}}?({DATE_LITERAL_PATTERN})",
     flags=re.IGNORECASE,
-)
-TITLE_SPLIT_RE = re.compile(r"\s[-|:]\s")
-TITLE_NOISE_SEGMENT_RE = re.compile(
-    r"\b(?:recruitment|job posting|job description|closed|posting id|req(?:uisition)?\.?|competition)\b",
-    flags=re.IGNORECASE,
-)
-TITLE_PREFIX_PATTERNS = (
-    r"^(?:closed\s*[-:|]\s*)?recruitment\s*[-:|]\s*\d{4,8}\s*[-:|]\s*",
-    r"^(?:closed\s*[-:|]\s*)?recruitment\s*[-:|]\s*",
-    r"^\d{4,8}\s*[-:|]\s*",
-    r"^(?:job\s*(?:posting|description)\s*[-:|]\s*)+",
-)
-TITLE_SUFFIX_PATTERNS = (
-    r"\s*[-:|]?\s*job\s*(?:description|posting|advertisement|ad|profile)\b(?:\s+\d{2,4})?\s*$",
-    r"\s*[-:|]?\s*job\s*(?:description|posting|advertisement|ad|profile)\b(?:\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{4})\s*$",
-    r"\s+\bjob\b\s*$",
-    r"\s*[-:|]?\s*recruitment\b(?:\s+\d{4,8})?\s*$",
-    r"\s*[-:|]?\s*(?:posting|req(?:uisition)?|competition)\s*(?:id|#)?\s*[a-z0-9-]+\s*$",
-    r"\s+\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{1,2}(?:,\s*)?)?\s+\d{4}\s*$",
-)
-GENERIC_TITLE_PATTERNS = (
-    re.compile(
-        r"^(?:view|see|browse|learn|open|click)\s+(?:current\s+)?(?:job\s+)?(?:posting|postings|opportunities|opportunity|careers?)\b",
-        flags=re.IGNORECASE,
-    ),
-    re.compile(
-        r"^(?:learn more(?: and)?|see current)\s+.*(?:posting|postings|opportunit|careers?)",
-        flags=re.IGNORECASE,
-    ),
-    re.compile(
-        r"\b(?:employment|career|careers)\s+opportunit(?:y|ies)\b",
-        flags=re.IGNORECASE,
-    ),
 )
 
 
@@ -254,8 +135,6 @@ def is_blocked_posting_url(url: str) -> bool:
     full = f"{host}{parsed.path}?{parsed.query}".lower()
     if any(token in full for token in BLOCKED_URL_TOKENS):
         return True
-    if any(token in full for token in HARD_NON_JOB_URL_TOKENS):
-        return True
 
     return False
 
@@ -265,11 +144,12 @@ def _path_slug(url: str) -> str:
     path_bits = [p for p in parsed.path.split("/") if p]
     if not path_bits:
         return ""
+
     slug = unquote(path_bits[-1])
     slug = re.sub(r"\.(pdf|html?|php|aspx?)$", "", slug, flags=re.IGNORECASE)
-    slug = slug.replace("+", " ")
     slug = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", slug)
     slug = re.sub(r"(?<=[A-Za-z])(?=\d)", " ", slug)
+    slug = slug.replace("+", " ")
     slug = re.sub(r"[_\-]+", " ", slug)
     slug = re.sub(r"\s+", " ", slug).strip(" -_")
     return slug
@@ -279,7 +159,6 @@ def derive_title_from_url(url: str) -> str:
     slug = _path_slug(url)
     if not slug:
         return ""
-
     words = [w for w in slug.split() if w]
     if not words:
         return ""
@@ -296,190 +175,6 @@ def derive_title_from_url(url: str) -> str:
     return normalize_job_title(_clean(" ".join(normalized_words)))
 
 
-def _title_segment_score(segment: str) -> int:
-    low = normalize_text(segment)
-    score = 0
-    if len(low.split()) >= 2:
-        score += 2
-    if any(word in low for word in ROLE_HINT_WORDS):
-        score += 4
-    if any(word in low for word in ("job", "position", "opportun", "career", "employment")):
-        score += 2
-    if TITLE_NOISE_SEGMENT_RE.search(low):
-        score -= 4
-    if re.search(r"\d{4,}", low):
-        score -= 1
-    return score
-
-
-def _strip_trailing_title_date(value: str) -> str:
-    return re.sub(
-        r"\s+\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{1,2}(?:,\s*)?)?\s+\d{4}\s*$",
-        "",
-        value,
-        flags=re.IGNORECASE,
-    ).strip(" -|:")
-
-
-def normalize_job_title(value: str) -> str:
-    title = _clean(value)
-    if not title:
-        return ""
-
-    title = title.replace("—", " - ").replace("–", " - ")
-    title = re.sub(r"\s+", " ", title).strip(" -|:")
-
-    for _ in range(3):
-        previous = title
-        for pattern in TITLE_PREFIX_PATTERNS:
-            title = re.sub(pattern, "", title, flags=re.IGNORECASE).strip(" -|:")
-        if title == previous:
-            break
-
-    for pattern in TITLE_SUFFIX_PATTERNS:
-        title = re.sub(pattern, "", title, flags=re.IGNORECASE).strip(" -|:")
-
-    parts = [part.strip(" -|:") for part in TITLE_SPLIT_RE.split(title) if part.strip(" -|:")]
-    if len(parts) > 1:
-        filtered: list[str] = []
-        for part in parts:
-            if re.fullmatch(r"\d{4,8}", part):
-                continue
-            if TITLE_NOISE_SEGMENT_RE.search(part):
-                continue
-            cleaned_part = _strip_trailing_title_date(part)
-            if not cleaned_part:
-                continue
-            filtered.append(cleaned_part)
-        if filtered:
-            part_scores = [(part, _title_segment_score(part)) for part in filtered]
-            if len(part_scores) >= 2 and part_scores[0][1] >= 3 and part_scores[1][1] >= 1 and len(part_scores[1][0].split()) >= 2:
-                title = f"{part_scores[0][0]} - {part_scores[1][0]}"
-            else:
-                scored = sorted(part_scores, key=lambda item: (item[1], len(item[0])), reverse=True)
-                title = scored[0][0] if scored[0][1] >= 1 else " - ".join(part for part, _ in part_scores)
-
-    title = _strip_trailing_title_date(title)
-
-    title = _clean(title.strip(" -|:"))
-    return title
-
-
-def is_noise_title(title: str) -> bool:
-    cleaned = normalize_text(title)
-    if not cleaned:
-        return True
-    if len(re.findall(r"[a-z]", cleaned)) < 3:
-        return True
-    if cleaned in BLOCKED_TEXT_EXACT:
-        return True
-    if "skip to content" in cleaned:
-        return True
-    if cleaned in GENERIC_TITLE_TEXT:
-        return True
-    if any(pattern.search(cleaned) for pattern in GENERIC_TITLE_PATTERNS):
-        return True
-    if any(token in cleaned for token in BLOCKED_TEXT_CONTAINS):
-        return True
-    if cleaned.startswith("closed") and any(word in cleaned for word in ("position", "job", "recruitment")):
-        return True
-    if any(term in cleaned for term in NON_JOB_TITLE_TERMS) and not looks_like_role_title(cleaned):
-        return True
-    if any(term in cleaned for term in ("employment", "career", "job board", "view jobs")) and not looks_like_role_title(
-        cleaned
-    ):
-        return True
-    if re.search(r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b", cleaned) and re.search(
-        r"\b\d{1,2}:\d{2}\b", cleaned
-    ):
-        return True
-    if len(cleaned) < 4:
-        return True
-    return False
-
-
-ROLE_HINT_WORDS = (
-    "officer",
-    "manager",
-    "coordinator",
-    "director",
-    "administrator",
-    "supervisor",
-    "clerk",
-    "analyst",
-    "specialist",
-    "worker",
-    "technician",
-    "assistant",
-    "engineer",
-    "planner",
-    "facilitator",
-    "consultant",
-    "chief",
-    "advisor",
-    "educator",
-    "instructor",
-    "operator",
-    "lead",
-    "trustee",
-    "labourer",
-    "lifeguard",
-    "driver",
-    "navigator",
-    "teacher",
-    "counsellor",
-    "counselor",
-    "co-op",
-    "intern",
-    "student",
-    "guard",
-    "cook",
-    "janitor",
-    "caretaker",
-    "attendant",
-    "worker",
-)
-
-NON_JOB_TITLE_TERMS = (
-    "permit form",
-    "application form",
-    "statute",
-    "regulation",
-    "terms and conditions",
-    "privacy policy",
-    "closed and filled position",
-    "closed and not filled position",
-)
-
-
-def looks_like_role_title(title: str) -> bool:
-    low = normalize_text(title)
-    if not low:
-        return False
-    return any(word in low for word in ROLE_HINT_WORDS)
-
-
-def looks_like_job_title(title: str) -> bool:
-    if is_noise_title(title):
-        return False
-    if _has_job_signal(title) or looks_like_role_title(title):
-        return True
-
-    # Accept specific multi-word titles that are neither generic nor navigation text.
-    cleaned = normalize_text(title)
-    words = [w for w in cleaned.split() if w]
-    if len(words) < 2:
-        return False
-    if words[0] in {"view", "see", "browse", "learn", "click", "apply"}:
-        return False
-    return True
-
-
-def _has_job_signal(text: str) -> bool:
-    low = normalize_text(text)
-    return any(word in low for word in JOB_HINT_KEYWORDS)
-
-
 def _is_navigation_link(anchor) -> bool:
     for idx, node in enumerate([anchor, *list(anchor.parents)[:4]]):
         name = (getattr(node, "name", "") or "").lower()
@@ -493,9 +188,9 @@ def _is_navigation_link(anchor) -> bool:
             class_str = str(classes or "")
         id_str = str(node.get("id") or "") if hasattr(node, "get") else ""
         attr_text = f"{class_str} {id_str}".lower()
+
         if any(token in attr_text for token in NAV_CLASS_TOKENS):
             return True
-
         if idx >= 2 and name == "li" and "menu" in attr_text:
             return True
 
@@ -532,23 +227,12 @@ def _extract_identifier(value: Any) -> str:
     return _clean(str(value or ""))
 
 
-def _best_title(anchor_text: str, posting_url: str) -> str:
-    candidate = normalize_job_title(_clean(anchor_text))
-    if not candidate or is_noise_title(candidate):
-        candidate = normalize_job_title(derive_title_from_url(posting_url))
-    if is_noise_title(candidate):
-        return ""
-    return candidate
-
-
 def parse_jobposting_jsonld(board_url: str, html: str) -> list[Posting]:
     soup = BeautifulSoup(html, "lxml")
     postings: list[Posting] = []
 
-    scripts = soup.find_all("script", attrs={"type": "application/ld+json"})
-    for script in scripts:
-        raw = script.string or script.text or ""
-        raw = raw.strip()
+    for script in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        raw = (script.string or script.text or "").strip()
         if not raw:
             continue
 
@@ -559,7 +243,7 @@ def parse_jobposting_jsonld(board_url: str, html: str) -> list[Posting]:
 
         items: list[dict[str, Any]] = []
         if isinstance(parsed, dict):
-            if "@graph" in parsed and isinstance(parsed["@graph"], list):
+            if isinstance(parsed.get("@graph"), list):
                 items.extend(i for i in parsed["@graph"] if isinstance(i, dict))
             else:
                 items.append(parsed)
@@ -567,7 +251,7 @@ def parse_jobposting_jsonld(board_url: str, html: str) -> list[Posting]:
             items.extend(i for i in parsed if isinstance(i, dict))
 
         for item in items:
-            typ = str(item.get("@type", "")).lower()
+            typ = _clean(str(item.get("@type", ""))).lower()
             if "jobposting" not in typ:
                 continue
 
@@ -575,17 +259,15 @@ def parse_jobposting_jsonld(board_url: str, html: str) -> list[Posting]:
             if is_blocked_posting_url(posting_url):
                 continue
 
-            title = _best_title(_clean(str(item.get("title", ""))), posting_url)
+            title = normalize_job_title(str(item.get("title") or "")) or derive_title_from_url(posting_url)
             if not title:
                 continue
 
-            location = _extract_location_from_jsonld(item.get("jobLocation"))
+            summary = _clean(str(item.get("description") or ""))
             posting_date = normalize_date(str(item.get("datePosted") or ""))
             closing_date = normalize_date(
                 str(item.get("validThrough") or item.get("dateValidThrough") or item.get("validUntil") or "")
             )
-            summary = _clean(str(item.get("description") or ""))
-
             if not posting_date or not closing_date:
                 inferred_posting, inferred_closing = extract_dates_from_text(summary)
                 posting_date = posting_date or inferred_posting
@@ -601,11 +283,14 @@ def parse_jobposting_jsonld(board_url: str, html: str) -> list[Posting]:
                     external_id=external_id,
                     title=title,
                     posting_url=posting_url,
-                    location=location,
+                    location=_extract_location_from_jsonld(item.get("jobLocation")),
                     posting_date=posting_date,
                     closing_date=closing_date,
                     summary=summary,
-                    raw_text=f"{title} {summary} {location}",
+                    raw_text=summary,
+                    title_source="jsonld",
+                    has_jobposting_schema=True,
+                    source_url=normalize_url(board_url),
                 )
             )
 
@@ -615,8 +300,10 @@ def parse_jobposting_jsonld(board_url: str, html: str) -> list[Posting]:
 def parse_job_links(board_url: str, html: str) -> list[Posting]:
     soup = BeautifulSoup(html, "lxml")
     postings: list[Posting] = []
-
     seen_urls: set[str] = set()
+
+    listing_signals = analyze_listing_signals(html)
+
     for anchor in soup.find_all("a", href=True):
         if _is_navigation_link(anchor):
             continue
@@ -625,8 +312,7 @@ def parse_job_links(board_url: str, html: str) -> list[Posting]:
         if not href:
             continue
 
-        target = urljoin(board_url, href)
-        target_n = normalize_url(target)
+        target_n = normalize_url(urljoin(board_url, href))
         if not target_n or target_n in seen_urls:
             continue
         if target_n == normalize_url(board_url):
@@ -638,22 +324,15 @@ def parse_job_links(board_url: str, html: str) -> list[Posting]:
         if not label:
             label = _clean(str(anchor.get("title") or anchor.get("aria-label") or ""))
 
-        parent_text = _clean(anchor.parent.get_text(" ", strip=True)) if anchor.parent else ""
-        context = _clean(f"{label} {parent_text}")[:900]
-        doc_link = bool(re.search(r"\.(pdf|docx?)$", target_n, flags=re.IGNORECASE))
-        if not _has_job_signal(f"{context} {target_n}"):
-            if not doc_link:
-                continue
-            inferred = derive_title_from_url(target_n)
-            if not (_has_job_signal(inferred) or looks_like_role_title(inferred)):
-                continue
+        title = normalize_job_title(label)
+        if not title or not is_anchor_job_title_candidate(title):
+            title = derive_title_from_url(target_n)
 
-        title = _best_title(label, target_n)
         if not title:
             continue
-        if not looks_like_job_title(title):
-            continue
 
+        parent_text = _clean(anchor.parent.get_text(" ", strip=True)) if anchor.parent else ""
+        context = _clean(f"{label} {parent_text}")[:1200]
         posting_date, closing_date = extract_dates_from_text(context)
 
         seen_urls.add(target_n)
@@ -667,6 +346,10 @@ def parse_job_links(board_url: str, html: str) -> list[Posting]:
                 closing_date=closing_date,
                 summary=context,
                 raw_text=context,
+                title_source="anchor",
+                has_jobposting_schema=False,
+                listing_signal=listing_signals.is_signal_true,
+                source_url=normalize_url(board_url),
             )
         )
 
@@ -685,10 +368,74 @@ def dedupe_postings(postings: list[Posting]) -> list[Posting]:
     return deduped
 
 
+async def enrich_postings_with_detail_titles(
+    board_url: str,
+    listing_html: str,
+    postings: list[Posting],
+    http: AsyncHttpHelper,
+    max_html_bytes: int,
+) -> list[Posting]:
+    if not postings:
+        return []
+
+    board_norm = normalize_url(board_url)
+    listing_signals = analyze_listing_signals(listing_html)
+    semaphore = asyncio.Semaphore(10)
+    cache: dict[str, tuple[str, str]] = {}
+
+    async def fetch_detail(url: str) -> tuple[str, str]:
+        normalized = normalize_url(url)
+        if not normalized:
+            return "", ""
+        if normalized in cache:
+            return cache[normalized]
+
+        async with semaphore:
+            html, final_url = await http.fetch_html_lite(normalized, max_bytes=max_html_bytes)
+        cache[normalized] = (html, final_url)
+        return cache[normalized]
+
+    async def enrich_one(posting: Posting) -> Posting:
+        posting.source_url = posting.source_url or board_norm
+        posting.listing_signal = posting.listing_signal or listing_signals.is_signal_true
+
+        detail_html = ""
+        detail_url = posting.posting_url
+        if normalize_url(posting.posting_url) and normalize_url(posting.posting_url) != board_norm:
+            detail_html, final_url = await fetch_detail(posting.posting_url)
+            if final_url:
+                posting.posting_url = normalize_url(final_url)
+                detail_url = posting.posting_url
+        else:
+            detail_html = listing_html
+            detail_url = board_norm
+
+        resolution = extract_title_hierarchy_from_detail(
+            detail_html=detail_html,
+            page_url=detail_url,
+            fallback_anchor_title=posting.title,
+        )
+
+        if resolution.title:
+            posting.title = resolution.title
+            posting.title_source = resolution.title_source or posting.title_source
+
+        posting.has_jobposting_schema = posting.has_jobposting_schema or resolution.has_jsonld_jobposting
+        merged_text = _clean(f"{posting.raw_text} {resolution.page_text}")
+        posting.raw_text = merged_text[:9000]
+
+        if not posting.posting_date or not posting.closing_date:
+            inferred_posting, inferred_closing = extract_dates_from_text(merged_text)
+            posting.posting_date = posting.posting_date or inferred_posting
+            posting.closing_date = posting.closing_date or inferred_closing
+
+        return posting
+
+    enriched = await asyncio.gather(*(enrich_one(p) for p in postings))
+    return dedupe_postings(enriched)
+
+
 def fallback_generic_html(board_url: str, html: str) -> list[Posting]:
     combined = parse_jobposting_jsonld(board_url, html)
-    if not combined:
-        combined = parse_job_links(board_url, html)
-    else:
-        combined.extend(parse_job_links(board_url, html))
+    combined.extend(parse_job_links(board_url, html))
     return dedupe_postings(combined)

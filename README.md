@@ -8,6 +8,7 @@ Fast two-part job monitoring for Ontario municipalities and Ontario First Nation
 - Part B (`monitor`): scrapes canonical boards weekly, detects new postings via SQLite history, emails a digest, and upserts to Google Sheets without overwriting manual columns (`status`, `applied_date`, `notes`).
   - Captures `posting_date` and `closing_date` when available.
   - Filters social/share/navigation links so `posting_url` and `title` are job-focused.
+  - Applies a title validation gate and rejects generic/non-job labels (e.g., notices, services, submit request links).
 
 ## Key design constraints implemented
 
@@ -77,6 +78,24 @@ Used for:
 - posting history (`first_seen_at` / `last_seen_at`)
 - new-posting detection
 - attribution links
+
+## Title quality controls
+
+- Shared utility: `src/ontario_job_bot/title_normalize_and_validate.py`
+- Deterministic title hierarchy:
+  1. ATS-native fields
+  2. Detail page JSON-LD / OpenGraph
+  3. Detail page H1 (fallback H2)
+  4. Listing anchor text (only if title-like)
+- Validation gate requires at least 2 job signals before a posting is accepted.
+
+Per run monitor stats include:
+- `titles_rejected_blocklist_count`
+- `titles_rejected_validation_gate_count`
+- `titles_cleaned_count`
+
+Per run rejection report:
+- `reports/title_rejections_YYYY-MM-DD.csv`
 
 ## Google Sheets behavior
 

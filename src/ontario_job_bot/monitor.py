@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import csv
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .adapters.common import is_blocked_posting_url, looks_like_job_title, normalize_job_title
+from .adapters.common import is_blocked_posting_url
 from .adapters.registry import get_adapter
 from .classifiers import classify_url
 from .config import Settings
@@ -27,6 +28,7 @@ from .db import (
 from .emailer import send_digest_email
 from .http_client import AsyncHttpHelper, url_variants
 from .sheets import upsert_postings_sheet
+from .title_normalize_and_validate import validate_title_and_job_gate
 from .utils import normalize_text, normalize_url, stable_hash
 
 
@@ -139,13 +141,37 @@ async def resolve_working_url(board_url: str, http: AsyncHttpHelper) -> tuple[st
     return normalize_url(board_url), "url_unresolved"
 
 
-def posting_to_db_row(posting) -> dict[str, str] | None:
-    title = normalize_job_title(str(posting.title or ""))
+def posting_to_db_row(posting) -> tuple[dict[str, str] | None, dict[str, Any]]:
     posting_url = normalize_url(str(posting.posting_url or ""))
-    if not title or not looks_like_job_title(title):
-        return None
     if not posting_url or is_blocked_posting_url(posting_url):
-        return None
+        return None, {
+            "accepted": False,
+            "normalized_title": str(posting.title or ""),
+            "cleaned": False,
+            "rejection_reason": "blocked posting URL",
+            "rejection_type": "blocklist",
+        }
+
+    validation = validate_title_and_job_gate(
+        candidate_title=str(posting.title or ""),
+        posting_url=posting_url,
+        source_url=str(posting.source_url or posting.board_url or posting_url),
+        title_source=str(posting.title_source or ""),
+        listing_text=str(posting.summary or ""),
+        detail_text=str(posting.raw_text or ""),
+        has_jsonld_jobposting=bool(posting.has_jobposting_schema),
+        listing_signal=bool(posting.listing_signal),
+    )
+    if not validation.accepted:
+        return None, {
+            "accepted": False,
+            "normalized_title": validation.normalized_title,
+            "cleaned": validation.cleaned,
+            "rejection_reason": validation.rejection_reason,
+            "rejection_type": validation.rejection_type,
+        }
+
+    title = validation.normalized_title
 
     posting_uid = stable_hash(f"{posting.board_url}|{posting.external_id}|{posting.posting_url}")[:40]
     content_seed = "|".join(
@@ -169,7 +195,39 @@ def posting_to_db_row(posting) -> dict[str, str] | None:
         "summary": posting.summary[:3000],
         "content_hash": stable_hash(content_seed),
         "raw_text": posting.raw_text,
+    }, {
+        "accepted": True,
+        "normalized_title": title,
+        "cleaned": validation.cleaned,
+        "rejection_reason": "",
+        "rejection_type": "",
     }
+
+
+def write_title_rejections_report(rejections: list[dict[str, str]]) -> Path:
+    report_dir = Path("reports")
+    report_dir.mkdir(parents=True, exist_ok=True)
+    date_stamp = datetime.now(timezone.utc).date().isoformat()
+    report_path = report_dir / f"title_rejections_{date_stamp}.csv"
+
+    with report_path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["org_id", "org_name", "source_url", "candidate_title", "rejection_reason"],
+        )
+        writer.writeheader()
+        for row in rejections:
+            writer.writerow(
+                {
+                    "org_id": row.get("org_id", ""),
+                    "org_name": row.get("org_name", ""),
+                    "source_url": row.get("source_url", ""),
+                    "candidate_title": row.get("candidate_title", ""),
+                    "rejection_reason": row.get("rejection_reason", ""),
+                }
+            )
+
+    return report_path
 
 
 def posting_org_links(
@@ -280,10 +338,13 @@ async def run_monitor(
         "new_postings": 0,
         "email_sent": False,
         "sheet_synced": False,
-        "titles_dropped_as_noise": 0,
+        "titles_rejected_blocklist_count": 0,
+        "titles_rejected_validation_gate_count": 0,
+        "titles_cleaned_count": 0,
         "failures": [],
     }
     new_posting_uids: set[str] = set()
+    title_rejections: list[dict[str, str]] = []
 
     async def scrape_one(board_url: str, board_data: dict[str, Any]) -> None:
         nonlocal stats
@@ -301,14 +362,29 @@ async def run_monitor(
                 return
 
             db_payload: list[dict[str, str]] = []
-            dropped = 0
             for posting in postings:
-                converted = posting_to_db_row(posting)
+                converted, validation = posting_to_db_row(posting)
+                if validation.get("cleaned"):
+                    stats["titles_cleaned_count"] += 1
                 if converted is None:
-                    dropped += 1
+                    rejection_type = validation.get("rejection_type", "")
+                    if rejection_type == "blocklist":
+                        stats["titles_rejected_blocklist_count"] += 1
+                    else:
+                        stats["titles_rejected_validation_gate_count"] += 1
+
+                    for org_id in board_data["owner_org_ids"]:
+                        title_rejections.append(
+                            {
+                                "org_id": org_id,
+                                "org_name": org_name_map.get(org_id, org_id),
+                                "source_url": str(posting.source_url or board_url),
+                                "candidate_title": str(posting.title or ""),
+                                "rejection_reason": str(validation.get("rejection_reason", "rejected")),
+                            }
+                        )
                     continue
                 db_payload.append(converted)
-            stats["titles_dropped_as_noise"] += dropped
             new_rows = upsert_postings(conn, board_url, db_payload)
             new_uids_local = {row["posting_uid"] for row in new_rows}
             new_posting_uids.update(new_uids_local)
@@ -325,17 +401,15 @@ async def run_monitor(
 
     try:
         await asyncio.gather(*(scrape_one(board_url, board_data) for board_url, board_data in board_items))
+        report_path = write_title_rejections_report(title_rejections)
+        stats["title_rejections_report"] = str(report_path)
 
         new_rows = rows_to_dicts(fetch_postings_with_orgs(conn, sorted(new_posting_uids)))
         cleaned_new_rows: list[dict[str, Any]] = []
         for row in new_rows:
-            title = normalize_job_title(str(row.get("title", "")))
             posting_url = normalize_url(str(row.get("posting_url", "")))
-            if not title or not looks_like_job_title(title):
-                continue
             if not posting_url or is_blocked_posting_url(posting_url):
                 continue
-            row["title"] = title
             row["posting_url"] = posting_url
             cleaned_new_rows.append(row)
         new_rows = cleaned_new_rows
@@ -348,13 +422,22 @@ async def run_monitor(
         sheet_rows_raw = rows_to_dicts(fetch_all_postings_for_sheet(conn))
         sheet_rows: list[dict[str, Any]] = []
         for row in sheet_rows_raw:
-            title = normalize_job_title(str(row.get("title", "")))
-            posting_url = normalize_url(str(row.get("posting_url", "")))
-            if not title or not looks_like_job_title(title):
+            validation = validate_title_and_job_gate(
+                candidate_title=str(row.get("title", "")),
+                posting_url=str(row.get("posting_url", "")),
+                source_url=str(row.get("board_url", "")),
+                title_source="sheet_row",
+                listing_text=str(row.get("summary", "")),
+                detail_text=str(row.get("summary", "")),
+                has_jsonld_jobposting=False,
+                listing_signal=False,
+            )
+            if not validation.accepted:
                 continue
+            posting_url = normalize_url(str(row.get("posting_url", "")))
             if not posting_url or is_blocked_posting_url(posting_url):
                 continue
-            row["title"] = title
+            row["title"] = validation.normalized_title
             row["posting_url"] = posting_url
             org_ids = [x for x in str(row.get("org_ids", "")).split("|") if x]
             row["org_names"] = " | ".join(sorted({org_name_map.get(oid, oid) for oid in org_ids}))

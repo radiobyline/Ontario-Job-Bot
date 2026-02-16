@@ -45,6 +45,10 @@ class Posting:
     closing_date: str = ""
     summary: str = ""
     raw_text: str = ""
+    title_source: str = ""
+    has_jobposting_schema: bool = False
+    listing_signal: bool = False
+    source_url: str = ""
 
     @property
     def posting_uid_seed(self) -> str:

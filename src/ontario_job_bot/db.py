@@ -367,6 +367,7 @@ def fetch_all_postings_for_sheet(conn: sqlite3.Connection) -> list[sqlite3.Row]:
             p.location,
             p.posting_date,
             p.closing_date,
+            p.summary,
             p.is_active,
             b.jobs_source_type,
             b.adapter,

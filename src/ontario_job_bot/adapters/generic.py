@@ -4,7 +4,7 @@ from ..config import Settings
 from ..http_client import AsyncHttpHelper
 from ..models import Posting
 from ..utils import normalize_url, stable_hash
-from .common import fallback_generic_html
+from .common import enrich_postings_with_detail_titles, fallback_generic_html
 
 
 class GenericAdapter:
@@ -24,10 +24,20 @@ class GenericAdapter:
                     posting_url=normalized,
                     summary="PDF posting",
                     raw_text="PDF posting",
+                    title_source="url_slug",
+                    source_url=normalized,
                 )
             ]
 
         html, final_url = await http.fetch_html_lite(normalized, settings.max_html_bytes)
         if not html:
             return []
-        return fallback_generic_html(normalize_url(final_url or normalized), html)
+        board_final = normalize_url(final_url or normalized)
+        parsed = fallback_generic_html(board_final, html)
+        return await enrich_postings_with_detail_titles(
+            board_url=board_final,
+            listing_html=html,
+            postings=parsed,
+            http=http,
+            max_html_bytes=settings.max_html_bytes,
+        )

@@ -73,6 +73,9 @@ class WorkdayAdapter:
                                 ),
                                 summary="",
                                 raw_text=f"{title} {location}",
+                                title_source="ats_native",
+                                listing_signal=True,
+                                source_url=normalized,
                             )
                         )
                     if postings:
