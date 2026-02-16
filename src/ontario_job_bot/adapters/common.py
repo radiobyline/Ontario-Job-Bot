@@ -105,6 +105,17 @@ GENERIC_TITLE_TEXT = {
     "careers nogdawindamin",
     "job opportunity",
     "job opportunities",
+    "view posting",
+    "view postings",
+    "view posting pdf",
+    "view pdf posting",
+    "view job posting",
+    "view job postings",
+    "view and apply",
+    "see job postings",
+    "see current employment opportunities",
+    "learn more and view job postings",
+    "skip to content",
     "openings",
     "index",
     "index cfm",
@@ -164,6 +175,20 @@ TITLE_SUFFIX_PATTERNS = (
     r"\s*[-:|]?\s*recruitment\b(?:\s+\d{4,8})?\s*$",
     r"\s*[-:|]?\s*(?:posting|req(?:uisition)?|competition)\s*(?:id|#)?\s*[a-z0-9-]+\s*$",
     r"\s+\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?:\s+\d{1,2}(?:,\s*)?)?\s+\d{4}\s*$",
+)
+GENERIC_TITLE_PATTERNS = (
+    re.compile(
+        r"^(?:view|see|browse|learn|open|click)\s+(?:current\s+)?(?:job\s+)?(?:posting|postings|opportunities|opportunity|careers?)\b",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:learn more(?: and)?|see current)\s+.*(?:posting|postings|opportunit|careers?)",
+        flags=re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:employment|career|careers)\s+opportunit(?:y|ies)\b",
+        flags=re.IGNORECASE,
+    ),
 )
 
 
@@ -348,7 +373,11 @@ def is_noise_title(title: str) -> bool:
         return True
     if cleaned in BLOCKED_TEXT_EXACT:
         return True
+    if "skip to content" in cleaned:
+        return True
     if cleaned in GENERIC_TITLE_TEXT:
+        return True
+    if any(pattern.search(cleaned) for pattern in GENERIC_TITLE_PATTERNS):
         return True
     if any(token in cleaned for token in BLOCKED_TEXT_CONTAINS):
         return True
@@ -433,7 +462,17 @@ def looks_like_role_title(title: str) -> bool:
 def looks_like_job_title(title: str) -> bool:
     if is_noise_title(title):
         return False
-    return _has_job_signal(title) or looks_like_role_title(title)
+    if _has_job_signal(title) or looks_like_role_title(title):
+        return True
+
+    # Accept specific multi-word titles that are neither generic nor navigation text.
+    cleaned = normalize_text(title)
+    words = [w for w in cleaned.split() if w]
+    if len(words) < 2:
+        return False
+    if words[0] in {"view", "see", "browse", "learn", "click", "apply"}:
+        return False
+    return True
 
 
 def _has_job_signal(text: str) -> bool:

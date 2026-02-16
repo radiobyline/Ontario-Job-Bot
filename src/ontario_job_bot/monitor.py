@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from .adapters.common import is_blocked_posting_url, looks_like_job_title, normalize_job_title
 from .adapters.registry import get_adapter
 from .classifiers import classify_url
 from .config import Settings
@@ -138,12 +139,19 @@ async def resolve_working_url(board_url: str, http: AsyncHttpHelper) -> tuple[st
     return normalize_url(board_url), "url_unresolved"
 
 
-def posting_to_db_row(posting) -> dict[str, str]:
+def posting_to_db_row(posting) -> dict[str, str] | None:
+    title = normalize_job_title(str(posting.title or ""))
+    posting_url = normalize_url(str(posting.posting_url or ""))
+    if not title or not looks_like_job_title(title):
+        return None
+    if not posting_url or is_blocked_posting_url(posting_url):
+        return None
+
     posting_uid = stable_hash(f"{posting.board_url}|{posting.external_id}|{posting.posting_url}")[:40]
     content_seed = "|".join(
         [
-            posting.title,
-            posting.posting_url,
+            title,
+            posting_url,
             posting.location,
             posting.posting_date,
             posting.closing_date,
@@ -153,8 +161,8 @@ def posting_to_db_row(posting) -> dict[str, str]:
     return {
         "posting_uid": posting_uid,
         "external_id": posting.external_id,
-        "title": posting.title[:500],
-        "posting_url": posting.posting_url,
+        "title": title[:500],
+        "posting_url": posting_url,
         "location": posting.location[:250],
         "posting_date": posting.posting_date[:80],
         "closing_date": posting.closing_date[:80],
@@ -272,6 +280,7 @@ async def run_monitor(
         "new_postings": 0,
         "email_sent": False,
         "sheet_synced": False,
+        "titles_dropped_as_noise": 0,
         "failures": [],
     }
     new_posting_uids: set[str] = set()
@@ -291,7 +300,15 @@ async def run_monitor(
                 update_board_scrape_status(conn, board_url, f"error:{str(exc)[:120]}")
                 return
 
-            db_payload = [posting_to_db_row(p) for p in postings]
+            db_payload: list[dict[str, str]] = []
+            dropped = 0
+            for posting in postings:
+                converted = posting_to_db_row(posting)
+                if converted is None:
+                    dropped += 1
+                    continue
+                db_payload.append(converted)
+            stats["titles_dropped_as_noise"] += dropped
             new_rows = upsert_postings(conn, board_url, db_payload)
             new_uids_local = {row["posting_uid"] for row in new_rows}
             new_posting_uids.update(new_uids_local)
@@ -310,16 +327,39 @@ async def run_monitor(
         await asyncio.gather(*(scrape_one(board_url, board_data) for board_url, board_data in board_items))
 
         new_rows = rows_to_dicts(fetch_postings_with_orgs(conn, sorted(new_posting_uids)))
+        cleaned_new_rows: list[dict[str, Any]] = []
+        for row in new_rows:
+            title = normalize_job_title(str(row.get("title", "")))
+            posting_url = normalize_url(str(row.get("posting_url", "")))
+            if not title or not looks_like_job_title(title):
+                continue
+            if not posting_url or is_blocked_posting_url(posting_url):
+                continue
+            row["title"] = title
+            row["posting_url"] = posting_url
+            cleaned_new_rows.append(row)
+        new_rows = cleaned_new_rows
         stats["new_postings"] = len(new_rows)
 
         if new_rows or settings.send_empty_digest:
             subject, body_text, body_html = render_digest(new_rows, org_name_map)
             stats["email_sent"] = send_digest_email(settings, subject, body_text, body_html)
 
-        sheet_rows = rows_to_dicts(fetch_all_postings_for_sheet(conn))
-        for row in sheet_rows:
+        sheet_rows_raw = rows_to_dicts(fetch_all_postings_for_sheet(conn))
+        sheet_rows: list[dict[str, Any]] = []
+        for row in sheet_rows_raw:
+            title = normalize_job_title(str(row.get("title", "")))
+            posting_url = normalize_url(str(row.get("posting_url", "")))
+            if not title or not looks_like_job_title(title):
+                continue
+            if not posting_url or is_blocked_posting_url(posting_url):
+                continue
+            row["title"] = title
+            row["posting_url"] = posting_url
             org_ids = [x for x in str(row.get("org_ids", "")).split("|") if x]
             row["org_names"] = " | ".join(sorted({org_name_map.get(oid, oid) for oid in org_ids}))
+            sheet_rows.append(row)
+        stats["sheet_rows_filtered"] = len(sheet_rows_raw) - len(sheet_rows)
 
         stats["sheet_synced"] = upsert_postings_sheet(settings, sheet_rows)
 
