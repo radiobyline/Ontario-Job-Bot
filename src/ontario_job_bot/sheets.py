@@ -10,6 +10,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from .config import Settings
+from .utils import normalize_text, normalize_url
 
 
 SHEET_COLUMNS = [
@@ -33,7 +34,8 @@ SHEET_COLUMNS = [
 ]
 
 MANUAL_COLUMNS = {"status", "applied_date", "notes"}
-REQUIRED_ORGS_COLUMNS = ("org_id", "org_name", "org_type", "homepage_url", "jobs_url")
+FULL_ORGS_COLUMNS = ("org_name", "org_type", "homepage_url", "jobs_url")
+ORG_MATCH_COLUMNS = ("org_id", "org_name", "homepage_url")
 
 
 def _normalize_header(value: str) -> str:
@@ -50,6 +52,13 @@ def _normalize_header(value: str) -> str:
         "home_page_url": "homepage_url",
         "job_url": "jobs_url",
         "job_urls": "jobs_url",
+        "jobs_careers_url": "jobs_url",
+        "careers_url": "jobs_url",
+        "job_board_url": "jobs_url",
+        "employment_url": "jobs_url",
+        "municipality": "org_name",
+        "organization": "org_name",
+        "type": "org_type",
     }
     return aliases.get(text, text)
 
@@ -63,30 +72,52 @@ def _row_values_to_dict(headers: list[str], values: list[str]) -> dict[str, str]
 
 def _worksheet_matches_orgs(headers: list[str]) -> bool:
     normalized = {_normalize_header(h) for h in headers if h}
-    return all(col in normalized for col in REQUIRED_ORGS_COLUMNS)
+    return all(col in normalized for col in FULL_ORGS_COLUMNS)
+
+
+def _worksheet_supports_org_updates(headers: list[str]) -> bool:
+    normalized = {_normalize_header(h) for h in headers if h}
+    return "jobs_url" in normalized and any(col in normalized for col in ORG_MATCH_COLUMNS)
+
+
+def _worksheet_mode(headers: list[str]) -> str:
+    if _worksheet_matches_orgs(headers):
+        return "full"
+    if _worksheet_supports_org_updates(headers):
+        return "delta"
+    return ""
 
 
 def _select_orgs_worksheet(
     spreadsheet: gspread.Spreadsheet,
     worksheet_name: str,
-) -> gspread.Worksheet:
+) -> tuple[gspread.Worksheet, str]:
     if worksheet_name:
         worksheet = spreadsheet.worksheet(worksheet_name)
         headers = worksheet.row_values(1)
-        if not _worksheet_matches_orgs(headers):
+        mode = _worksheet_mode(headers)
+        if not mode:
             raise ValueError(
-                f"Worksheet '{worksheet_name}' is missing one or more required columns: {', '.join(REQUIRED_ORGS_COLUMNS)}"
+                f"Worksheet '{worksheet_name}' does not contain a usable org URL layout."
             )
-        return worksheet
+        return worksheet, mode
 
+    delta_match: gspread.Worksheet | None = None
     for worksheet in spreadsheet.worksheets():
         headers = worksheet.row_values(1)
-        if _worksheet_matches_orgs(headers):
-            return worksheet
+        mode = _worksheet_mode(headers)
+        if mode == "full":
+            return worksheet, "full"
+        if mode == "delta" and delta_match is None:
+            delta_match = worksheet
+
+    if delta_match is not None:
+        return delta_match, "delta"
 
     raise ValueError(
-        "No worksheet found with required org columns: "
-        + ", ".join(REQUIRED_ORGS_COLUMNS)
+        "No worksheet found with org URL columns. Needed either full org columns "
+        f"({', '.join(FULL_ORGS_COLUMNS)}) or update columns including jobs_url and one of "
+        f"{', '.join(ORG_MATCH_COLUMNS)}."
     )
 
 
@@ -111,6 +142,41 @@ def _row_dict(headers: list[str], values: list[str]) -> dict[str, str]:
     for i, h in enumerate(headers):
         result[h] = values[i] if i < len(values) else ""
     return result
+
+
+def _normalized_headers(raw_headers: list[str]) -> list[str]:
+    normalized_headers: list[str] = []
+    counts: dict[str, int] = {}
+    for header in raw_headers:
+        base = _normalize_header(header)
+        if not base:
+            base = "column"
+        count = counts.get(base, 0) + 1
+        counts[base] = count
+        normalized_headers.append(base if count == 1 else f"{base}_{count}")
+    return normalized_headers
+
+
+def _match_key(value: str) -> str:
+    return normalize_text(value)
+
+
+def _load_csv_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    if not path.exists():
+        return [], []
+    with path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        headers = list(reader.fieldnames or [])
+        rows = [dict(row) for row in reader]
+    return headers, rows
+
+
+def _write_csv_rows(path: Path, headers: list[str], rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def upsert_postings_sheet(settings: Settings, posting_rows: list[dict]) -> bool:
@@ -185,27 +251,14 @@ def export_orgs_csv_from_sheet(
         raise ValueError("GOOGLE_ORGS_SPREADSHEET_ID or GOOGLE_SHEETS_SPREADSHEET_ID must be set.")
 
     spreadsheet = client.open_by_key(spreadsheet_id)
-    worksheet = _select_orgs_worksheet(spreadsheet, worksheet_name or settings.google_orgs_worksheet)
+    worksheet, mode = _select_orgs_worksheet(spreadsheet, worksheet_name or settings.google_orgs_worksheet)
 
     values = worksheet.get_all_values()
     if not values:
         raise ValueError(f"Worksheet '{worksheet.title}' is empty.")
 
     raw_headers = [h.strip() for h in values[0]]
-    if not _worksheet_matches_orgs(raw_headers):
-        raise ValueError(
-            f"Worksheet '{worksheet.title}' is missing one or more required columns: {', '.join(REQUIRED_ORGS_COLUMNS)}"
-        )
-
-    normalized_headers: list[str] = []
-    counts: dict[str, int] = {}
-    for header in raw_headers:
-        base = _normalize_header(header)
-        if not base:
-            base = "column"
-        count = counts.get(base, 0) + 1
-        counts[base] = count
-        normalized_headers.append(base if count == 1 else f"{base}_{count}")
+    normalized_headers = _normalized_headers(raw_headers)
 
     rows: list[dict[str, str]] = []
     for record in values[1:]:
@@ -214,15 +267,76 @@ def export_orgs_csv_from_sheet(
             continue
         rows.append(item)
 
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-    with output_csv.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=normalized_headers)
-        writer.writeheader()
-        writer.writerows(rows)
+    if mode == "full":
+        _write_csv_rows(output_csv, normalized_headers, rows)
+        return {
+            "spreadsheet_id": spreadsheet_id,
+            "worksheet": worksheet.title,
+            "mode": "full",
+            "row_count": len(rows),
+            "output_csv": str(output_csv),
+        }
+
+    base_headers, base_rows = _load_csv_rows(output_csv)
+    if not base_rows:
+        raise ValueError(
+            f"Worksheet '{worksheet.title}' has only partial columns and baseline CSV {output_csv} is missing."
+        )
+
+    if "jobs_url" not in base_headers:
+        base_headers.append("jobs_url")
+
+    by_org_id: dict[str, dict[str, str]] = {}
+    by_org_name: dict[str, dict[str, str]] = {}
+    by_homepage: dict[str, dict[str, str]] = {}
+    for row in base_rows:
+        org_id = (row.get("org_id") or "").strip()
+        org_name = _match_key(row.get("org_name") or "")
+        homepage = normalize_url(row.get("homepage_url") or "")
+        if org_id:
+            by_org_id[org_id] = row
+        if org_name:
+            by_org_name[org_name] = row
+        if homepage:
+            by_homepage[homepage] = row
+
+    updated = 0
+    unmatched = 0
+    for patch in rows:
+        jobs_url = (patch.get("jobs_url") or "").strip()
+        if not jobs_url:
+            continue
+
+        target = None
+        org_id = (patch.get("org_id") or "").strip()
+        if org_id:
+            target = by_org_id.get(org_id)
+        if target is None:
+            org_name = _match_key(patch.get("org_name") or "")
+            if org_name:
+                target = by_org_name.get(org_name)
+        if target is None:
+            homepage = normalize_url(patch.get("homepage_url") or "")
+            if homepage:
+                target = by_homepage.get(homepage)
+
+        if target is None:
+            unmatched += 1
+            continue
+
+        if (target.get("jobs_url") or "").strip() != jobs_url:
+            target["jobs_url"] = jobs_url
+            updated += 1
+
+    _write_csv_rows(output_csv, base_headers, base_rows)
 
     return {
         "spreadsheet_id": spreadsheet_id,
         "worksheet": worksheet.title,
-        "row_count": len(rows),
+        "mode": "delta",
+        "patch_rows": len(rows),
+        "jobs_url_updates": updated,
+        "unmatched_rows": unmatched,
+        "row_count": len(base_rows),
         "output_csv": str(output_csv),
     }

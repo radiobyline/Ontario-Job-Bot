@@ -57,6 +57,10 @@ Sync organizations from Google Sheets to CSV:
 PYTHONPATH=src python -m ontario_job_bot sync-orgs --output data/orgs.csv
 ```
 
+`sync-orgs` supports:
+- full org tables (`org_name`, `org_type`, `homepage_url`, `jobs_url`), or
+- delta sheets with `jobs_url` + one identifier (`org_id`, `org_name`, or `homepage_url`) to patch existing CSV rows.
+
 Run weekly monitor:
 
 ```bash
