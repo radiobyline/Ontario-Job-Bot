@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import load_settings
 from .discovery import discover_urls
 from .monitor import run_monitor
+from .sheets import export_orgs_csv_from_sheet
 
 
 def _print_json(payload: dict) -> None:
@@ -32,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--output", default=None, help="Output enriched CSV path")
     p_all.add_argument("--limit", type=int, default=None, help="Optional row limit for discover")
     p_all.add_argument("--max-boards", type=int, default=None, help="Optional board limit for monitor")
+
+    p_sync = sub.add_parser("sync-orgs", help="Sync organizations CSV from Google Sheets")
+    p_sync.add_argument("--output", default=None, help="Output CSV path (default ORGS_CSV)")
+    p_sync.add_argument("--worksheet", default=None, help="Worksheet name override")
 
     return parser
 
@@ -70,6 +75,16 @@ def main() -> None:
                 "monitor": monitor_stats,
             }
         )
+        return
+
+    if args.cmd == "sync-orgs":
+        output_csv = Path(args.output) if args.output else settings.orgs_csv
+        stats = export_orgs_csv_from_sheet(
+            settings=settings,
+            output_csv=output_csv,
+            worksheet_name=(args.worksheet or ""),
+        )
+        _print_json({"command": "sync-orgs", **stats})
         return
 
 

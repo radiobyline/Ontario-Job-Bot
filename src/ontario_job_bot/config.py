@@ -52,6 +52,8 @@ class Settings:
 
     google_sheets_spreadsheet_id: str
     google_sheets_worksheet: str
+    google_orgs_spreadsheet_id: str
+    google_orgs_worksheet: str
     google_service_account_json: str
     google_service_account_json_path: str
 
@@ -96,6 +98,8 @@ def load_settings() -> Settings:
         send_empty_digest=_as_bool(os.getenv("SEND_EMPTY_DIGEST"), False),
         google_sheets_spreadsheet_id=os.getenv("GOOGLE_SHEETS_SPREADSHEET_ID", ""),
         google_sheets_worksheet=os.getenv("GOOGLE_SHEETS_WORKSHEET", "Postings"),
+        google_orgs_spreadsheet_id=os.getenv("GOOGLE_ORGS_SPREADSHEET_ID", ""),
+        google_orgs_worksheet=os.getenv("GOOGLE_ORGS_WORKSHEET", ""),
         google_service_account_json=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", ""),
         google_service_account_json_path=os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON_PATH", ""),
     )

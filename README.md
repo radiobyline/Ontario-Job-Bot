@@ -39,7 +39,9 @@ cp .env.example .env
 # fill required values
 ```
 
-3. Place organizations CSV at `data/orgs.csv` (already included here).
+3. Organizations can come from:
+- `data/orgs.csv` (local file), or
+- Google Sheets via `sync-orgs` (recommended for live URL edits).
 
 ## Commands
 
@@ -47,6 +49,12 @@ Run discovery:
 
 ```bash
 PYTHONPATH=src python -m ontario_job_bot discover --input data/orgs.csv --output data/orgs_enriched.csv
+```
+
+Sync organizations from Google Sheets to CSV:
+
+```bash
+PYTHONPATH=src python -m ontario_job_bot sync-orgs --output data/orgs.csv
 ```
 
 Run weekly monitor:
@@ -129,6 +137,8 @@ Required repository secrets:
 - `EMAIL_FROM`
 - `EMAIL_TO`
 - `GOOGLE_SHEETS_SPREADSHEET_ID`
+- `GOOGLE_ORGS_SPREADSHEET_ID` (optional; defaults to `GOOGLE_SHEETS_SPREADSHEET_ID`)
+- `GOOGLE_ORGS_WORKSHEET` (optional; if omitted, workflow auto-detects first sheet with org columns)
 - `GOOGLE_SERVICE_ACCOUNT_JSON`
 
 `GOOGLE_SERVICE_ACCOUNT_JSON` should be the full service-account JSON string.
